@@ -3,30 +3,43 @@ from pathlib import Path
 
 
 
-
-
-
+class IndexEntry:
+	def __init__(self, hash_, nameofs_flags, offset, datalen, filesize):
+		self.hash = hash_
+		self.nameofs_flags = nameofs_flags
+		self.offset = offset
+		# the C program tracks datalen and filesize separately but for us they're always the same
+		# since FTL doesn't compress the files
+		self.filesize = filesize
 
 
 
 
 def main():
 	with open("ftl.dat", "rb") as pkg:
+		#for the time being, everything is hardcoded
 		outdir = "extractions1"
 		nfiles, index_list, names_string = read_package(pkg)
 		for i in range(nfiles):
-			path = readcstr(names_string, ((index_list[i][1]) & 0x00FFFFFF))
+			# the bitwise anding is just to filter out the flags (flags and name position share a 4-byte number)
+			# but flags are always 0 for FTL anyway so that is not necessary
+			#name_start = ((index_list[i].nameofs_flags) & 0x00FFFFFF)
+			name_start = index_list[i].nameofs_flags
+			path = readcstr(names_string, name_start)
 			#print(path)
 			extract(pkg, index_list[i], outdir+"/"+path)
 
 
 def extract(pkg, index_entry, outpath):
+	#create any necessary directories
 	path = Path(outpath)
 	path.parent.mkdir(parents=True, exist_ok=True)
+	#truncate (or create if doesn't exist) and open for writing in binary mode
 	with open(outpath, "w+b") as f:
-		#I'm gonna skip the deflating flag as I don't think FTL uses that
-		datalen = index_entry[3]
-		pkg.seek(index_entry[2])
+		#we don't even check for deflating flag as FTL doesn't use that
+		#copy the contents in blocks of up to 65536 bytes
+		datalen = index_entry.filesize
+		pkg.seek(index_entry.offset)
 		readbuf = ""
 		pos = 0
 		while pos < datalen:
@@ -36,21 +49,25 @@ def extract(pkg, index_entry, outpath):
 
 
 def read_package(pkg):
-		b = pkg.read(16)
-		_, header_size, entry_size, entry_count, name_size = struct.unpack(">LHHLL", b)
-		#print(entry_count, name_size, name_size/entry_count)
+	header_size = 16
+	header = pkg.read(header_size)
+	magic, header_size, entry_size, entry_count, name_size = struct.unpack(">LHHLL", header)
+	assert magic == int(b"PKG\012".hex(), 16)
+	assert header_size == 16
+	assert entry_size == 20
 
-		pkg_index_entry_size = 4 * 5
-		index_size = entry_count * pkg_index_entry_size
+	index_size = entry_count * entry_size
 
-		index_list = []
-		for i in range(entry_count):
-			b = pkg.read(pkg_index_entry_size)
-			index_list.append(struct.unpack(">LLLLL", b))
+	index_list = []
+	for i in range(entry_count):
+		b = pkg.read(entry_size)
+		#5 big endian 32-bit ints
+		data = struct.unpack(">LLLLL", b)
+		index_list.append(IndexEntry(*data))
 
-		names_string = str(pkg.read(name_size), "ascii")
+	names_string = str(pkg.read(name_size), "ascii")
 
-		return entry_count, index_list, names_string
+	return entry_count, index_list, names_string
 
 
 def readcstr(string, start_index):
@@ -62,6 +79,7 @@ def readcstr(string, start_index):
 	return string[start_index:index]
 
 
+#this would be one way to convert a number to big endian and back if there wasn't a convenient way to do it
 """def be_to_u32(num):
 	b0 = (num & 0x000000ff) << 24
 	b1 = (num & 0x0000ff00) << 8
